@@ -244,23 +244,14 @@ int main(int argc, char** argv) {
 	SDL_CHECK(SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO) == 0);
 #if SDL_MAJOR_VERSION >= 2
 	SDL_InitSubSystem(SDL_INIT_JOYSTICK);
-
 #endif
-	int videoflag = SDL_SWSURFACE | SDL_HWPALETTE;
+	int videoflag = SDL_HWPALETTE;
 #ifdef _3DS
 	fsInit();
 	romfsInit();
+	extern int SDL_JoystickInit(void);
+	SDL_JoystickInit();
 	videoflag = SDL_DOUBLEBUF | SDL_HWSURFACE | SDL_CONSOLEBOTTOM | SDL_TOPSCR;
-	SDL_N3DSKeyBind(KEY_CPAD_UP|KEY_CSTICK_UP, SDLK_UP);
-	SDL_N3DSKeyBind(KEY_CPAD_DOWN|KEY_CSTICK_DOWN, SDLK_DOWN);
-	SDL_N3DSKeyBind(KEY_CPAD_LEFT|KEY_CSTICK_LEFT, SDLK_LEFT);
-	SDL_N3DSKeyBind(KEY_CPAD_RIGHT|KEY_CSTICK_RIGHT, SDLK_RIGHT);
-	SDL_N3DSKeyBind(KEY_SELECT, SDLK_F11); //to switch full screen
-	SDL_N3DSKeyBind(KEY_START, SDLK_ESCAPE); //to pause
-	
-	SDL_N3DSKeyBind(KEY_Y, SDLK_LSHIFT); //hold to reset / load/save state
-	SDL_N3DSKeyBind(KEY_L, SDLK_d); //load state
-	SDL_N3DSKeyBind(KEY_R, SDLK_s); //save state
 #endif
 	SDL_CHECK(screen = SDL_SetVideoMode(PICO8_W*scale, PICO8_H*scale, 32, videoflag));
 	SDL_WM_SetCaption("Celeste", NULL);
@@ -354,8 +345,7 @@ int main(int argc, char** argv) {
 	SDL_FreeSurface(font);
 	for (int i = 0; i < (sizeof snd)/(sizeof *snd); i++) {
 		if (snd[i]) Mix_FreeChunk(snd[i]);
-	}
-	for (int i = 0; i < (sizeof mus)/(sizeof *mus); i++) {
+	} for (int i = 0; i < (sizeof mus)/(sizeof *mus); i++) {
 		if (mus[i]) Mix_FreeMusic(mus[i]);
 	}
 
@@ -365,12 +355,58 @@ int main(int argc, char** argv) {
 	return 0;
 }
 
+static const Uint16 stick_deadzone = 32767 / 2; //about half
 #if SDL_MAJOR_VERSION >= 2
 static void ReadGamepadInput(Uint8* out_buttons, _Bool* out_presspause);
 #endif
 
 static void mainLoop(void) {
+#ifndef _3DS
 	const Uint8* kbstate = SDL_GetKeyState(NULL);
+#else
+	// HACK: fake the keyboard state and key-down events
+	static Uint8 kbstate[512];
+	{
+		assert(SDL_NumJoysticks() > 0);
+		static SDL_Joystick* sdl_joystick;
+		if (!sdl_joystick) sdl_joystick = SDL_JoystickOpen(0);
+		assert(sdl_joystick != NULL);
+		SDL_JoystickUpdate();
+
+		kbstate[SDLK_z] = SDL_JoystickGetButton(sdl_joystick, 1); //A
+		kbstate[SDLK_x] = SDL_JoystickGetButton(sdl_joystick, 2); //B
+		kbstate[SDLK_LSHIFT] = SDL_JoystickGetButton(sdl_joystick, 4); //Y
+		// L
+		int old_L = kbstate[SDLK_d];
+		if ((kbstate[SDLK_d] = SDL_JoystickGetButton(sdl_joystick, 5)) && !old_L) {
+			//not pressed previous frame and pressed this frame: fake event
+			SDL_PushEvent(&(SDL_Event) {SDL_KEYDOWN, .key = {.type = SDL_KEYDOWN, .state = SDL_PRESSED, .keysym = {0, SDLK_d}}});
+		}
+		// R
+		int old_R = kbstate[SDLK_s];
+		if ((kbstate[SDLK_s]= SDL_JoystickGetButton(sdl_joystick, 6)) && !old_R) {
+			SDL_PushEvent(&(SDL_Event) {SDL_KEYDOWN, .key = {.type = SDL_KEYDOWN, .state = SDL_PRESSED, .keysym = {0, SDLK_s}}});
+		}
+		// START
+		int old_START = kbstate[SDLK_ESCAPE];
+		if ((kbstate[SDLK_ESCAPE] = SDL_JoystickGetButton(sdl_joystick, 0)) && !old_START) {
+			SDL_PushEvent(&(SDL_Event) {SDL_KEYDOWN, .key = {.type = SDL_KEYDOWN, .state = SDL_PRESSED, .keysym = {0, SDLK_ESCAPE}}});
+		}
+		// SELECT
+		int old_SELECT = kbstate[SDLK_F11];
+		if ((kbstate[SDLK_F11] = SDL_JoystickGetButton(sdl_joystick, 7)) && !old_SELECT) {
+			SDL_PushEvent(&(SDL_Event) {SDL_KEYDOWN, .key = {.type = SDL_KEYDOWN, .state = SDL_PRESSED, .keysym = {0, SDLK_F11}}});
+		}
+		//directional keys
+		Uint8 dpad = SDL_JoystickGetHat(sdl_joystick, 0);
+		Sint16 x_axis = SDL_JoystickGetAxis(sdl_joystick, 0);
+		Sint16 y_axis = SDL_JoystickGetAxis(sdl_joystick, 1);
+		kbstate[SDLK_DOWN]  = (dpad & SDL_HAT_DOWN)  || y_axis > stick_deadzone;
+		kbstate[SDLK_LEFT]  = (dpad & SDL_HAT_LEFT)  || x_axis < -stick_deadzone;
+		kbstate[SDLK_UP]    = (dpad & SDL_HAT_UP)    || y_axis < -stick_deadzone;
+		kbstate[SDLK_RIGHT] = (dpad & SDL_HAT_RIGHT) || x_axis > stick_deadzone;
+	}
+#endif
 		
 	static int reset_input_timer = 0;
 	//hold F9 (select+start+y) to reset
@@ -464,8 +500,8 @@ static void mainLoop(void) {
 		if (kbstate[SDLK_RIGHT]) buttons_state |= (1<<1);
 		if (kbstate[SDLK_UP])    buttons_state |= (1<<2);
 		if (kbstate[SDLK_DOWN])  buttons_state |= (1<<3);
-		if (kbstate[SDLK_z] || kbstate[SDLK_c] || kbstate[SDLK_n] || kbstate[SDLK_a]) buttons_state |= (1<<4);
-		if (kbstate[SDLK_x] || kbstate[SDLK_v] || kbstate[SDLK_m] || kbstate[SDLK_b]) buttons_state |= (1<<5);
+		if (kbstate[SDLK_z] || kbstate[SDLK_c] || kbstate[SDLK_n]) buttons_state |= (1<<4);
+		if (kbstate[SDLK_x] || kbstate[SDLK_v] || kbstate[SDLK_m]) buttons_state |= (1<<5);
 	} else if (TAS && !paused) {
 		static int t = 0;
 		t++;
@@ -489,15 +525,11 @@ static void mainLoop(void) {
 	}
 	OSDdraw();
 
-	/*for (int i = 0 ; i < 16;i++) {
-		SDL_Rect rc = {i*8*scale, 0, 8*scale, 4*scale};
-		SDL_FillRect(screen, &rc, i);
-	}*/
-
 	SDL_Flip(screen);
 
-#if defined(_3DS) /*using SDL_DOUBLEBUF for videomode makes it so SDL_Flip waits for Vsync; so we dont have to delay manually*/ \
- || defined(EMSCRIPTEN) //emscripten_set_main_loop already sets the fps
+#if defined(EMSCRIPTEN) //emscripten_set_main_loop already sets the fps
+	SDL_Delay(1);
+#elif defined(_3DS)
 	SDL_Delay(1);
 #else
 	static int t = 0;
@@ -912,7 +944,6 @@ static struct mapping controller_mappings[] = {
 	{SDL_CONTROLLER_BUTTON_DPAD_UP,    2}, //up
 	{SDL_CONTROLLER_BUTTON_DPAD_DOWN,  3}, //down
 };
-static const Uint16 stick_deadzone = 32767 / 2; //about half
 
 static void ReadGamepadInput(Uint8* out_buttons, _Bool* out_presspause) {
 	static SDL_GameController* controller = NULL;
@@ -923,7 +954,7 @@ static void ReadGamepadInput(Uint8* out_buttons, _Bool* out_presspause) {
 
 		//use first available controller
 		int count = SDL_NumJoysticks();
-		printf("sdl reports %i controllers\n", count);
+		printf("(%i) sdl reports %i controllers\n", tries_left, count);
 		for (int i = 0; i < count; i++) {
 			if (SDL_IsGameController(i)) {
 				controller = SDL_GameControllerOpen(i);
